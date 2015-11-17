@@ -92,10 +92,14 @@ class RxpPacket:
         self.header = RxpHeader()
         
 class RxpHeader:
-    _src_port = 0
-    _dest_port = 0
-    _seq_number = 0
-    _ack_number = 0
+    #short = 16 bits, int = 32 bits, char = 8 bits
+    # H = 
+    HEADER_FORMAT = '!HHLLBBHHH'
+    
+    _src_port = 0           #16 bits
+    _dest_port = 0          #16 bits
+    _seq_number = 0         #32 bits
+    _ack_number = 0         #32 bits
     _data_offset = 0
     _reserved = 0
     _nack = 0
@@ -116,4 +120,7 @@ class RxpHeader:
 
     def set_source_port(self, src):
         self._src_port = src
+        
+    def to_bytes(self):
+        return 
     
