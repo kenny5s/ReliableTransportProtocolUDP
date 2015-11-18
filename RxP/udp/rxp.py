@@ -57,7 +57,7 @@ class Rxp:
         while(attempts <= self._connect_retries):
             self.send(self.generate_header())
     
-    def listen(self):
+    def listen(self, backlog):
         pass
     
     def accept(self):
@@ -92,35 +92,178 @@ class RxpPacket:
         self.header = RxpHeader()
         
 class RxpHeader:
-    #short = 16 bits, int = 32 bits, char = 8 bits
-    # H = 
-    HEADER_FORMAT = '!HHLLBBHHH'
-    
-    _src_port = 0           #16 bits
-    _dest_port = 0          #16 bits
-    _seq_number = 0         #32 bits
-    _ack_number = 0         #32 bits
-    _data_offset = 0
-    _reserved = 0
-    _nack = 0
-    _urg = 0
-    _ack = 0
-    _psh = 0
-    _rst = 0
-    _syn = 0
-    _fin = 0
-    _window_size = 0
-    _checksum = 0
-    _urgent_pointer = 0
-    _options = 0
-    _payload = b''
+    HEADER_FORMAT = '!HHLLHHHH'
     
     def __init__(self):
-        pass
+        self.src_port = 0           #16 bits = 2 bytes
+        self.dest_port = 0          #16 bits = 2 bytes
+        self.seq_number = 0         #32 bits = 4 bytes
+        self.ack_number = 0         #32 bits = 4 bytes
+        self.data_offset = 0        #4 bits = .5 bytes
+        self.reserved = 0           #5 bits
+        self.nack = 0               #1 bit
+        self.urg = 0                #1 bit
+        self.ack = 0                #1 bit
+        self.psh = 0                #1 bit
+        self.rst = 0                #1 bit
+        self.syn = 0                #1 bit
+        self.fin = 0                #1 bit
+        self.window_size = 0        #16 bits = 2 bytes
+        self.checksum = 0           #16 bits = 2 bytes
+        self.urgent_pointer = 0     #16 bits = 2 bytes
 
-    def set_source_port(self, src):
-        self._src_port = src
+    def get_src_port(self):
+        return self.__src_port
+
+
+    def get_dest_port(self):
+        return self.__dest_port
+
+
+    def get_seq_number(self):
+        return self.__seq_number
+
+
+    def get_ack_number(self):
+        return self.__ack_number
+
+
+    def get_data_offset(self):
+        return self.__data_offset
+
+
+    def get_reserved(self):
+        return self.__reserved
+
+
+    def get_nack(self):
+        return self.__nack
+
+
+    def get_urg(self):
+        return self.__urg
+
+
+    def get_ack(self):
+        return self.__ack
+
+
+    def get_psh(self):
+        return self.__psh
+
+
+    def get_rst(self):
+        return self.__rst
+
+
+    def get_syn(self):
+        return self.__syn
+
+
+    def get_fin(self):
+        return self.__fin
+
+
+    def get_window_size(self):
+        return self.__window_size
+
+
+    def get_checksum(self):
+        return self.__checksum
+
+
+    def get_urgent_pointer(self):
+        return self.__urgent_pointer
+
+
+    def set_src_port(self, value):
+        self.__src_port = value
+
+
+    def set_dest_port(self, value):
+        self.__dest_port = value
+
+
+    def set_seq_number(self, value):
+        self.__seq_number = value
+
+
+    def set_ack_number(self, value):
+        self.__ack_number = value
+
+
+    def set_data_offset(self, value):
+        self.__data_offset = value
+
+
+    def set_reserved(self, value):
+        self.__reserved = value
+
+
+    def set_nack(self, value):
+        self.__nack = value
+
+
+    def set_urg(self, value):
+        self.__urg = value
+
+
+    def set_ack(self, value):
+        self.__ack = value
+
+
+    def set_psh(self, value):
+        self.__psh = value
+
+
+    def set_rst(self, value):
+        self.__rst = value
+
+
+    def set_syn(self, value):
+        self.__syn = value
+
+
+    def set_fin(self, value):
+        self.__fin = value
+
+
+    def set_window_size(self, value):
+        self.__window_size = value
+
+
+    def set_checksum(self, value):
+        self.__checksum = value
+
+
+    def set_urgent_pointer(self, value):
+        self.__urgent_pointer = value
+        
+    def _pack_octet_12(self):
+        packed = (self.data_offset << 12) + (self.reserved << 7) + (self.nack << 6) + (self.urg << 5) + (self.ack << 4) + (self.psh << 3) + (self.rst << 2) + (self.syn << 1) + self.fin 
+        return packed
         
     def to_bytes(self):
-        return 
+        octet_12 = self._pack_octet_12()
+        return struct.pack(self.HEADER_FORMAT, self.src_port, self.dest_port,
+                    self.seq_number, self.ack_number, octet_12,
+                    self.window_size, self.checksum, self.urgent_pointer)
+    
+    src_port = property(get_src_port, set_src_port)
+    dest_port = property(get_dest_port, set_dest_port)
+    seq_number = property(get_seq_number, set_seq_number)
+    ack_number = property(get_ack_number, set_ack_number)
+    data_offset = property(get_data_offset, set_data_offset)
+    reserved = property(get_reserved, set_reserved)
+    nack = property(get_nack, set_nack)
+    urg = property(get_urg, set_urg)
+    ack = property(get_ack, set_ack)
+    psh = property(get_psh, set_psh)
+    rst = property(get_rst, set_rst)
+    syn = property(get_syn, set_syn)
+    fin = property(get_fin, set_fin)
+    window_size = property(get_window_size, set_window_size)
+    checksum = property(get_checksum, set_checksum)
+    urgent_pointer = property(get_urgent_pointer, set_urgent_pointer)
+    
     
