@@ -18,31 +18,12 @@ class Rxp:
     _recv_buffer = []
     _send_buffer = []
     
-    _src_ip = ''
-    _dest_ip = ''
-    _src_port = 0
-    _dest_port = 0
-    _seq_number = 0
-    _ack_number = 0
-    _data_offset = 0
-    _reserved = 0
-    _nack = 0
-    _urg = 0
-    _ack = 0
-    _psh = 0
-    _rst = 0
-    _syn = 0
-    _fin = 0
-    _window_size = 0
-    _checksum = 0
-    _urgent_pointer = 0
-    _options = 0
-    _payload = b''
-    
     _header = b''
     _sock = None
     
-    _connect_retries = 1
+    _connect_retries = 3
+    _dst_address = ''
+    _dst_port = None
     
     def __init__(self):
         self._sock = socket.socket(type=socket.SOCK_DGRAM)
@@ -53,9 +34,16 @@ class Rxp:
         self._sock.bind(address_tuple)
     
     def connect(self, address):
+        dst_addr = address[0]
+        dst_port = address[1]
         attempts = 0
         while(attempts <= self._connect_retries):
-            self.send(self.generate_header())
+            try:
+                pkt = RxpPacket()
+                pkt.header.syn = 1
+                self._send_to(dst_addr, dst_port, pkt)
+            except:
+                pass
     
     def listen(self, backlog):
         pass
@@ -63,9 +51,12 @@ class Rxp:
     def accept(self):
         pass
     
+    def _send_to(self, address, port, rxp_packet):
+        return self._sock.sendall(rxp_packet.to_bytes())
+    
     def send(self, byte_string):
         pkt = RxpPacket(byte_string)
-        pass
+        self._send_to(self._dst_address, self._dst_port, pkt)
 
     def receive(self, size):
         pass
@@ -79,27 +70,29 @@ class Rxp:
     
     def get_timeout(self):
         pass
-
-    def generate_header(self, src=0, dst=0, seq=0, ack_num=0, dat_off=0,resrv=0,nck=0,urg=0,ack=0,psh=0,rst=0,syn=0,fin=0,win_size=0,chksum=0,urgptr=0,opts=0,data=b''):
-        pass
     
     def send_ack(self):
         self.send(self.generate_header())
       
       
 class RxpPacket:
-    def __init__(self):
+    
+    def __init__(self, data_bytes=None):
         self.header = RxpHeader()
+        self.payload = b'' if data_bytes is None else data_bytes 
+    
+    def to_bytes(self):
+        self.header.to_bytes() + bytearray(self.payload)
         
 class RxpHeader:
     HEADER_FORMAT = '!HHLLHHHH'
     
     def __init__(self):
-        self.src_port = 0           #16 bits = 2 bytes
-        self.dest_port = 0          #16 bits = 2 bytes
-        self.seq_number = 0         #32 bits = 4 bytes
-        self.ack_number = 0         #32 bits = 4 bytes
-        self.data_offset = 0        #4 bits = .5 bytes
+        self.src_port = 0           #16 bits = 2 bytes = H
+        self.dest_port = 0          #16 bits = 2 bytes = H
+        self.seq_number = 0         #32 bits = 4 bytes = L
+        self.ack_number = 0         #32 bits = 4 bytes = L
+        self.data_offset = 0        #4 bits
         self.reserved = 0           #5 bits
         self.nack = 0               #1 bit
         self.urg = 0                #1 bit
@@ -108,9 +101,9 @@ class RxpHeader:
         self.rst = 0                #1 bit
         self.syn = 0                #1 bit
         self.fin = 0                #1 bit
-        self.window_size = 0        #16 bits = 2 bytes
-        self.checksum = 0           #16 bits = 2 bytes
-        self.urgent_pointer = 0     #16 bits = 2 bytes
+        self.window_size = 0        #16 bits = 2 bytes = H
+        self.checksum = 0           #16 bits = 2 bytes = H
+        self.urgent_pointer = 0     #16 bits = 2 bytes = H
 
     def get_src_port(self):
         return self.__src_port
