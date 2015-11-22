@@ -23,8 +23,8 @@ class RxpTcp(object):
     def accept(self):
         return self._sock.accept()
     
-    def send(self, byte_string):
-        return self._sock.send(byte_string)
+    def send(self, bytes):
+        return self._sock.send(bytes)
 
     def receive(self, size):
         return self._sock.recv(size)
