@@ -45,6 +45,10 @@ class Flags(Enum):
     FIN_ACK = FIN + ACK
 
 class RxpSocket:
+
+    _send_buffer = bytearray() # bytes (no limit)
+    _recv_buffer = bytearray() # bytes
+    _recv_buffer_max = 1000000 # 1Mb max (better if multiple of _max_packet_size)
     
     _CLOSING_TIMEOUT = 2 #seconds
     _SENDING_TIMEOUT = 0.003 #seconds
@@ -123,6 +127,15 @@ class RxpSocket:
             pkt.header.flags = flags
             self._sock.sendto(pkt.to_bytes(), self._dest)
             self._ctrl_timer.start()
+
+    def send(self, data):
+        self._send_buffer.extend(data)
+        return len(data)
+
+    def receive(self, buffer_size):
+        ret = _recv_buffer[:buffer_size]
+        _recv_buffer = _recv_buffer[buffer_size:]
+        return ret
         
     def _send_receive_thread(self):
         while(True):
