@@ -51,6 +51,7 @@ class RxpSocket:
     
     _logger = logging.getLogger(__name__)
     _sock = None
+    _lock = threading.Lock()
     _state = None
     _closing_timer = None
     _ctrl_timer = None
@@ -73,7 +74,12 @@ class RxpSocket:
         
         def become_closed():
             self._state = States.CLOSED
-            self._sock.close()
+            if self._parent_socket is None:
+                self._sock.close()
+            else:
+                #remove from parent
+                self._parent_socket = None
+                
         self._closing_timer = threading.Timer(self._CLOSING_TIMEOUT, become_closed)
         
         def ctrl_timed_out_true():
@@ -82,7 +88,8 @@ class RxpSocket:
         
     def bind(self, address):
         #can only bind if not connected
-        self._sock.bind(address)
+        with self._lock:
+            self._sock.bind(address)
         self._src = address
         if address[0] in ['localhost', '']:
             self._src[0] = '127.0.0.1'
@@ -107,7 +114,23 @@ class RxpSocket:
         self._send_ctrl_msg(Flags.FIN, True)
         self._state = States.FIN_WAIT_1
         #needs to wait until closed
-            
+        
+    def _udp_sendto(self, data, address):
+        if self._parent_socket is None:
+            with self._lock:
+                value = self._sock.sendto(data, address)
+        else:
+            with self._lock:
+                value = self._parent_socket._sock.sendto(data, address)
+        return value
+    
+    def _udp_recvfrom(self, buff_size):
+        if self._parent_socket is None:
+            value = self._sock.recvfrom(buff_size)
+        else:
+            value = self._parent_socket._
+        return value
+    
     def _send_ctrl_msg(self, flags, timer=False):
         pkt = RxpPacket()
         pkt.header.flags = flags
@@ -121,7 +144,7 @@ class RxpSocket:
             self._ctrl_needs_sending = False
             pkt = RxpPacket()
             pkt.header.flags = flags
-            self._sock.sendto(pkt.to_bytes(), self._dest)
+            self._udp_sendto(pkt.to_bytes(), self._dest)
             self._ctrl_timer.start()
         
     def _send_receive_thread(self):
