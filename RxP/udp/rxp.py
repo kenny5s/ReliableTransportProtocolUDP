@@ -56,10 +56,11 @@ class RxpSocket:
     _recv_buffer_max = 1000000 # 1Mb max (better if multiple of _max_packet_size)
     _udp_buffer_size = 2048
     
+    _ACCEPT_TIMEOUT = 60 #seconds
     _CLOSING_TIMEOUT = 2 #seconds
     _SENDING_TIMEOUT = 0.003 #seconds
     
-    logging.basicConfig(format='[%(thread)d]%(funcName)s:%(lineno)d::%(message)s', level=logging.DEBUG)
+    logging.basicConfig(format='[%(thread)d]%(funcName)s:%(lineno)d::%(message)s', level=logging.INFO)
     
     _parent_socket = None # if not None, then you are a child socket
     
@@ -89,7 +90,8 @@ class RxpSocket:
         self._src = () # (ip,port)
         self._dest = ()
         
-        self._dead = False
+        #TODO:
+        self._dead = False # to prevent closed sockets from being reused
     
     def __init__(self):
         self._initialize_variables()
@@ -114,7 +116,6 @@ class RxpSocket:
         
     def _shutdown(self):
         logging.debug('SHUTTING DOWN')
-        self._state = States.CLOSED
         with self._send_recv_lock:
             logging.debug('Obtained send_recv_lock')
             self._thread_send_recv_enabled = False
@@ -126,7 +127,9 @@ class RxpSocket:
         else:
             #remove from parent
             self._parent_socket._connections.pop(self._dest)
+            self._parent_socket._established_connections.remove(self._dest)
             self._parent_socket = None
+        self._state = States.CLOSED
         logging.debug('Shutdown successful.')
         
     def _start_closing_timer(self, timeout=None):
@@ -160,7 +163,7 @@ class RxpSocket:
         wait = True
         def stop_wait():
             raise socket.timeout()
-        t = threading.Timer(10, stop_wait)
+        t = threading.Timer(self._ACCEPT_TIMEOUT, stop_wait)
         t.start()
         conn = None
         while(wait):
@@ -196,8 +199,10 @@ class RxpSocket:
                     child_sock = self._connections[addr].socket
                     logging.info("Closing child sockets")
                     child_sock.close()
-                    self._connections.pop(addr)
-                    self._established_connections.remove(addr)
+                    while child_sock._state != States.CLOSED:
+                        pass
+                    #self._connections.pop(addr) # Child already calls pop()
+                    #self._established_connections.remove(addr)
                     logging.info("closed child socket for {}".format(addr))
                 if not self._connections:
                     break
@@ -271,11 +276,15 @@ class RxpSocket:
         
     # Main function that represents the state diagram
     def _send_receive_thread(self):
+        shutdown_at_end = False
         while(self._thread_send_recv_enabled):
             logging.debug("Requesting _send_recv_lock...")
             with self._send_recv_lock:
+                if not self._thread_send_recv_enabled:
+                    break
+                
                 #for debug:
-                time.sleep(5)
+                #time.sleep(5)
                 logging.debug(self._state)
                 logging.debug(self._dest)
                 logging.debug(self._connections)
@@ -510,7 +519,10 @@ class RxpSocket:
                     elif self._state == States.LAST_ACK:
                         logging.debug("THREAD-RECEIVE: LAST_ACK")
                         if header.flags == self.ACK:
-                            self._start_closing_timer(0)
+                            shutdown_at_end = True
+                            
+            if shutdown_at_end:
+                self._shutdown()
                     
 
 ## Old code
