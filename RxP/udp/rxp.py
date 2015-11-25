@@ -88,10 +88,12 @@ class RxpSocket:
         #data transfer
         self._send_buffer = bytearray() # bytes (no limit)
         self._recv_buffer = bytearray() # bytes
-        self._send_window = [] # packets
-        self._receive_window = [] # packets
-        self._syn_number = 0
+        self._send_window = collections.OrderedDict() # packets
+        self._receive_window = collections.OrderedDict() # packets
+        self._seq_number = 0
         self._ack_number = 0
+        self._send_window_size = 100
+        self._mtu = 1024 # maximum data size
         
         self._src = () # (ip,port)
         self._dest = ()
@@ -268,6 +270,11 @@ class RxpSocket:
         with self._listen_lock:
             logging.debug("_backlog_full() received _listen_lock")
             return (len(self._pending_connections) + len(self._established_connections)) >= self._max_backlog_connections
+        
+    #If checksum is good, return True, else False
+    def _validate_checksum(self, packet):
+        #TODO
+        pass
 
     # Puts data into the receive buffer and return the size of data
     def send(self, data):
@@ -335,7 +342,16 @@ class RxpSocket:
                     #Will constantly check the send buffer for packets, pop data out of it into a sending window,
                     #send the packet to the target destination, waits for acks or timeout, if timeout resend the packet,
                     #else slide the window
-                    pass
+                    if len(self._send_window) < self._send_window_size and self._send_buffer:
+                        pkt = RxpPacket(self._send_buffer[:self._mtu])
+                        pkt.header.seq_number = self._seq_number
+                        pkt.header.ack_number = self._ack_number
+                        self._send_window[self._seq_number] = (pkt, False)
+                        self._send_buffer = self._send_buffer[self._mtu:]
+                        #start resend timer
+                    for pkt_tuple in self._send_window:
+                        if pkt_tuple[1]:
+                            self._udp_sendto(pkt_tuple[0], self._dest)
                 
                 # Closing procedures and states
 
@@ -399,137 +415,139 @@ class RxpSocket:
                     header = pkt.header
                     logging.debug("Received...")
                     logging.debug((data, addr))
-                    
-                    if self._state == States.CLOSED:
-                        logging.debug("THREAD-RECEIVE: CLOSED")
-                        pass
-            
-                    elif self._state == States.LISTEN:
-                        #If listening, then you must be a Server
-                        #Forward packet to appropriate fwrd_recv_buffer
-                        #Requires a binded port
-                        #Multiplex connections
-                        #Server stays on listen
-                        #New child socket is added to connection list
-                        
-                        logging.debug("THREAD-RECEIVE: LISTEN")
-                        
-                        # Received SYN -> make new connection
-                        
-                        if (header.flags == self.SYN and not self._backlog_full()):
-                            with self._listen_lock:
-                                if addr not in self._connections:
-                                    logging.debug("Creating child_socket")
-                                    child_socket = RxpSocket()
-                                    child_socket._state = States.SYN_RCVD
-                                    child_socket._dest = addr
-                                    child_socket._parent_socket = self
-                                    child_socket._socket_lock = self._socket_lock
-                                    child_socket._listen_lock = self._listen_lock
-                                    logging.debug("Sending ctrl: SYN_ACK")
-                                    self._send_ctrl_msg(self.SYN_ACK, addr)
-                                    self._pending_connections.append(addr)
-                                    self._connections[addr] = SocketConnection(child_socket)
-                                    child_socket._start_threads()
-                        else:
-                            with self._listen_lock:
-                                if addr in self._connections:
-                                    logging.debug("Forwarding to {}:{}".format(addr[0],addr[1]))
-                                    self._connections[addr].recv_forwarding.append(pkt)
-                            
-                    elif self._state == States.SYN_RCVD:
-                        #could only really get here as child socket
-                        logging.debug("THREAD-RECEIVE: SYN_RCVD")
-                        if header.flags == self.ACK:
-                            #maybe handle accept()?
-                            self._state = States.ESTABLISHED
-                            if self._parent_socket is not None:
-                                with self._listen_lock:
-                                    self._parent_socket._pending_connections.remove(addr)
-                                    self._parent_socket._established_connections.append(addr)
-                        elif header.flags == self.SYN:
-                            self._send_ctrl_msg(self.SYN_ACK, addr)
-                            
-                    elif self._state == States.SYN_SENT:
-                        logging.debug("THREAD-RECEIVE: SYN_SENT")
-                        if header.flags == self.SYN:
-                            self._state = States.SYN_RCVD
-                            self._send_ctrl_msg(self.SYN_ACK, addr)
-                        elif header.flags == self.SYN_ACK:
-                            self._state = States.SYN_ACK_RCVD
-                            self._send_ctrl_msg(self.ACK, addr)
-                            
-                    elif self._state == States.SYN_ACK_RCVD:
-                        logging.debug("THREAD-RECEIVE: SYN_ACK_RCVD")
-                        logging.debug(header.flags)
-                        if header.flags == self.ACK:
-                            self._send_ctrl_msg(self.ACK, addr)
-                            self._state = States.ESTABLISHED 
-                    
-                    elif self._state == States.ESTABLISHED:
-                        logging.debug("THREAD-RECEIVE: ESTABLISHED")
-                        if header.flags == self.FIN:
-                            self._state = States.CLOSE_WAIT
-                            self._send_ctrl_msg(self.ACK, addr)
-                        elif header.flags == self.SYN_ACK: #for 3-way handshake... not needed anymore?
-                            self._send_ctrl_msg(self.ACK, addr)
-                        elif header.flags == self.ACK: # 4-way handshake
-                            logging.debug("Sending ACK reply")
-                            self._send_ctrl_msg(self.ACK, addr)
-                        elif header.flags == 0:
-                            #pipeline receive:
-                            #check seq number
-                            #if curr_seq is higher and not window, put packet in window_buffer
-                            #if all seq numbers up to this one is received, put in recv buffer
-                            #ack back w/ recv_window
-                            reply_pkt = RxpPacket(b"Hello")
-                            self._udp_sendto(reply_pkt, addr)
-                    
-                    elif self._state == States.FIN_WAIT_1:
-                        logging.debug("THREAD-RECEIVE: FIN_WAIT_1")
-                        if header.flags == self.FIN:
-                            self._state = States.CLOSING
-                            self._send_ctrl_msg(self.ACK, addr)
-                        elif header.flags == self.ACK:
-                            self._state = States.FIN_WAIT_2
-                        elif header.flags == self.FIN_ACK:
-                            self._state = States.TIMED_WAIT
-                            self._start_closing_timer()
-                            self._send_ctrl_msg(self.ACK, addr)
-                    
-                    elif self._state == States.FIN_WAIT_2:
-                        logging.debug("THREAD-RECEIVE: FIN_WAIT_2")
-                        if header.flags == self.FIN:
-                            logging.debug("Entering TIMED WAIT")
-                            self._state = States.TIMED_WAIT
-                            self._start_closing_timer()
-                            self._send_ctrl_msg(self.ACK, addr)
-                            
-                    elif self._state == States.CLOSING:
-                        logging.debug("THREAD-RECEIVE: CLOSING")
-                        if header.flags == self.ACK:
-                            self._state = States.TIMED_WAIT
-                            self._start_closing_timer()
-                        elif header.flags == self.FIN:
-                            self._send_ctrl_msg(self.ACK, addr)
+                    if self._validate_checksum(pkt):
+                        if self._state == States.CLOSED:
+                            logging.debug("THREAD-RECEIVE: CLOSED")
+                            pass
                 
-                    elif self._state == States.TIMED_WAIT:
-                        logging.debug("THREAD-RECEIVE: TIMED_WAIT")
-                        if header.flags == self.FIN or header.flags == self.FIN_ACK:
-                            self._send_ctrl_msg(self.ACK, addr)
+                        elif self._state == States.LISTEN:
+                            #If listening, then you must be a Server
+                            #Forward packet to appropriate fwrd_recv_buffer
+                            #Requires a binded port
+                            #Multiplex connections
+                            #Server stays on listen
+                            #New child socket is added to connection list
                             
-                    elif self._state == States.CLOSE_WAIT:
-                        logging.debug("THREAD-RECEIVE: CLOSE_WAIT")
-                        if header.flags == self.FIN:
-                            self._send_ctrl_msg(self.ACK, addr)
+                            logging.debug("THREAD-RECEIVE: LISTEN")
                             
-                    elif self._state == States.LAST_ACK:
-                        logging.debug("THREAD-RECEIVE: LAST_ACK")
-                        if header.flags == self.ACK:
-                            shutdown_at_end = True
+                            # Received SYN -> make new connection
+                            
+                            if (header.flags == self.SYN and not self._backlog_full()):
+                                with self._listen_lock:
+                                    if addr not in self._connections:
+                                        logging.debug("Creating child_socket")
+                                        child_socket = RxpSocket()
+                                        child_socket._state = States.SYN_RCVD
+                                        child_socket._dest = addr
+                                        child_socket._parent_socket = self
+                                        child_socket._socket_lock = self._socket_lock
+                                        child_socket._listen_lock = self._listen_lock
+                                        logging.debug("Sending ctrl: SYN_ACK")
+                                        self._send_ctrl_msg(self.SYN_ACK, addr)
+                                        self._pending_connections.append(addr)
+                                        self._connections[addr] = SocketConnection(child_socket)
+                                        child_socket._start_threads()
+                            else:
+                                with self._listen_lock:
+                                    if addr in self._connections:
+                                        logging.debug("Forwarding to {}:{}".format(addr[0],addr[1]))
+                                        self._connections[addr].recv_forwarding.append(pkt)
+                                
+                        elif self._state == States.SYN_RCVD:
+                            #could only really get here as child socket
+                            logging.debug("THREAD-RECEIVE: SYN_RCVD")
+                            if header.flags == self.ACK:
+                                #maybe handle accept()?
+                                self._state = States.ESTABLISHED
+                                if self._parent_socket is not None:
+                                    with self._listen_lock:
+                                        self._parent_socket._pending_connections.remove(addr)
+                                        self._parent_socket._established_connections.append(addr)
+                            elif header.flags == self.SYN:
+                                self._send_ctrl_msg(self.SYN_ACK, addr)
+                                
+                        elif self._state == States.SYN_SENT:
+                            logging.debug("THREAD-RECEIVE: SYN_SENT")
+                            if header.flags == self.SYN:
+                                self._state = States.SYN_RCVD
+                                self._send_ctrl_msg(self.SYN_ACK, addr)
+                            elif header.flags == self.SYN_ACK:
+                                self._state = States.SYN_ACK_RCVD
+                                self._send_ctrl_msg(self.ACK, addr)
+                                
+                        elif self._state == States.SYN_ACK_RCVD:
+                            logging.debug("THREAD-RECEIVE: SYN_ACK_RCVD")
+                            logging.debug(header.flags)
+                            if header.flags == self.ACK:
+                                self._send_ctrl_msg(self.ACK, addr)
+                                self._state = States.ESTABLISHED 
+                        
+                        elif self._state == States.ESTABLISHED:
+                            logging.debug("THREAD-RECEIVE: ESTABLISHED")
+                            if header.flags == self.FIN:
+                                #TODO: Begin closing!
+                                self._state = States.CLOSE_WAIT
+                                self._send_ctrl_msg(self.ACK, addr)
+                            elif header.flags == self.SYN_ACK: #for 3-way handshake... not needed anymore?
+                                self._send_ctrl_msg(self.ACK, addr)
+                            elif header.flags == self.ACK: # 4-way handshake
+                                logging.debug("Sending ACK reply")
+                                self._send_ctrl_msg(self.ACK, addr)
+                            elif header.flags == 0:
+                                #pipeline receive:
+                                #check seq number
+                                #if curr_seq is higher and not window, put packet in window_buffer
+                                #if all seq numbers up to this one is received, put in recv buffer
+                                #ack back w/ recv_window
+                                reply_pkt = RxpPacket(b"Hello")
+                                self._udp_sendto(reply_pkt, addr)
+                        
+                        elif self._state == States.FIN_WAIT_1:
+                            logging.debug("THREAD-RECEIVE: FIN_WAIT_1")
+                            if header.flags == self.FIN:
+                                self._state = States.CLOSING
+                                self._send_ctrl_msg(self.ACK, addr)
+                            elif header.flags == self.ACK:
+                                self._state = States.FIN_WAIT_2
+                            elif header.flags == self.FIN_ACK:
+                                self._state = States.TIMED_WAIT
+                                self._start_closing_timer()
+                                self._send_ctrl_msg(self.ACK, addr)
+                        
+                        elif self._state == States.FIN_WAIT_2:
+                            logging.debug("THREAD-RECEIVE: FIN_WAIT_2")
+                            if header.flags == self.FIN:
+                                logging.debug("Entering TIMED WAIT")
+                                self._state = States.TIMED_WAIT
+                                self._start_closing_timer()
+                                self._send_ctrl_msg(self.ACK, addr)
+                                
+                        elif self._state == States.CLOSING:
+                            logging.debug("THREAD-RECEIVE: CLOSING")
+                            if header.flags == self.ACK:
+                                self._state = States.TIMED_WAIT
+                                self._start_closing_timer()
+                            elif header.flags == self.FIN:
+                                self._send_ctrl_msg(self.ACK, addr)
+                    
+                        elif self._state == States.TIMED_WAIT:
+                            logging.debug("THREAD-RECEIVE: TIMED_WAIT")
+                            if header.flags == self.FIN or header.flags == self.FIN_ACK:
+                                self._send_ctrl_msg(self.ACK, addr)
+                                
+                        elif self._state == States.CLOSE_WAIT:
+                            logging.debug("THREAD-RECEIVE: CLOSE_WAIT")
+                            if header.flags == self.FIN:
+                                self._send_ctrl_msg(self.ACK, addr)
+                                
+                        elif self._state == States.LAST_ACK:
+                            logging.debug("THREAD-RECEIVE: LAST_ACK")
+                            if header.flags == self.ACK:
+                                shutdown_at_end = True
                             
             if shutdown_at_end:
                 self._shutdown()
+                shutdown_at_end = False
                     
 
 ## Old code
