@@ -70,22 +70,28 @@ class RxpSocket:
         
         self._state = States.CLOSED
         
+        #threading
         self._listen_lock = threading.Lock()
         self._socket_lock = threading.Lock()
-        self._send_recv_lock = threading.Condition(threading.Lock())
-        
+        self._send_recv_lock = threading.Condition(threading.Lock()) # didn't make use of Condition at all...
         self._thread_send_recv_enabled = False
         self._thread_send_recv = None
         self._thread_ctrl_timer = None
         
+        #connections
         self._ctrl_needs_sending = True
         self._max_backlog_connections = 1
         self._pending_connections = [] # SYN_RCVD, [(addr1), (addr2)]
         self._established_connections = [] # ESTABLISHED [(addr1), (addr2)]
         self._connections = {} # (addr): SocketConnections, All connections go here.
         
+        #data transfer
         self._send_buffer = bytearray() # bytes (no limit)
         self._recv_buffer = bytearray() # bytes
+        self._send_window = [] # packets
+        self._receive_window = [] # packets
+        self._syn_number = 0
+        self._ack_number = 0
         
         self._src = () # (ip,port)
         self._dest = ()
@@ -197,19 +203,19 @@ class RxpSocket:
                 if self._connections:
                     addr = list(self._connections)[0]
                     child_sock = self._connections[addr].socket
-                    logging.info("Closing child sockets")
+                    logging.debug("Closing child sockets")
                     child_sock.close()
                     while child_sock._state != States.CLOSED:
                         pass
                     #self._connections.pop(addr) # Child already calls pop()
                     #self._established_connections.remove(addr)
-                    logging.info("closed child socket for {}".format(addr))
+                    logging.debug("closed child socket for {}".format(addr))
                 if not self._connections:
                     break
             self._shutdown()
                    
         elif self._state != States.LISTEN:
-            logging.info("I am not listener. Closing")
+            logging.debug("I am not listener. Closing")
             self._send_ctrl_msg(self.FIN, self._dest, True)
             if (self._state == States.ESTABLISHED or
                 self._state == States.SYN_RCVD):
@@ -281,6 +287,7 @@ class RxpSocket:
             logging.debug("Requesting _send_recv_lock...")
             with self._send_recv_lock:
                 if not self._thread_send_recv_enabled:
+                    logging.debug("breaking out of send_receive loop")
                     break
                 
                 #for debug:
