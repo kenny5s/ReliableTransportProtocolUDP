@@ -453,6 +453,7 @@ class RxpSocket:
                     elif self._state == States.FIN_WAIT_2:
                         logging.debug("THREAD-RECEIVE: FIN_WAIT_2")
                         if header.flags == self.FIN:
+                            logging.debug("Entering TIMED WAIT")
                             self._state = States.TIMED_WAIT
                             self._start_closing_timer()
                             self._send_ctrl_msg(self.ACK, addr)
