@@ -256,15 +256,18 @@ class RxpSocket:
             logging.debug("_backlog_full() received _listen_lock")
             return (len(self._pending_connections) + len(self._established_connections)) >= self._max_backlog_connections
 
+    # Puts data into the receive buffer and return the size of data
     def send(self, data):
         self._send_buffer.extend(data)
         return len(data)
 
+    # Reserve space in the byte array
     def receive(self, buffer_size):
         ret = self._recv_buffer[:buffer_size]
         _recv_buffer = self._recv_buffer[buffer_size:]
         return ret
         
+    # Main function that represents the state diagram
     def _send_receive_thread(self):
         while(self._thread_send_recv_enabled):
             logging.debug("Requesting _send_recv_lock...")
@@ -291,6 +294,7 @@ class RxpSocket:
                             logging.debug("Forwarding send packet to {}:{}".format(addr[0], addr[1]))
                             self._udp_sendto(pkt, addr)
                 
+                # 4-way handshake procedure (not in order)
                 elif self._state == States.SYN_RCVD:
                     logging.debug("THREAD-SEND: SYN_RCVD")
                     self._resend_ctrl_msg(self.SYN_ACK)
@@ -302,7 +306,9 @@ class RxpSocket:
                 elif self._state == States.SYN_ACK_RCVD:
                     logging.debug("THREAD-SEND: SYN_ACK_RCVD")
                     self._resend_ctrl_msg(self.ACK)
+                # END 4-way handshake procedure
                     
+                # Connection is established, applies to client and server
                 elif self._state == States.ESTABLISHED:
                     logging.debug("THREAD-SEND: ESTABLISHED")
                     #Does this also need to resend an ACK?
@@ -313,29 +319,54 @@ class RxpSocket:
                     #else slide the window
                     pass
                 
+                # Closing procedures and states
+
+                # May come from SYN-RCVD or ESTABLISHED state
+                # ESTABLISHED: close() is called
+                # SYN-RCVD: close() is called
+                # Sends a FIN flag
                 elif self._state == States.FIN_WAIT_1:
                     logging.debug("THREAD-SEND: FIN_WAIT_1")
                     self._resend_ctrl_msg(self.FIN)
                 
+                # Only come from FIN-WAIT-1 state
+                # FIN-WAIT-1: Received an ACK flag
+                # Does not send anything
                 elif self._state == States.FIN_WAIT_2:
                     logging.debug("THREAD-SEND: FIN_WAIT_2")
                     pass
                 
+                # Only come from FIN-WAIT-1 state
+                # FIN-WAIT-1: Received a FIN flag
+                # Sends an ACK flag
                 elif self._state == States.CLOSING:
                     logging.debug("THREAD-SEND: CLOSING")
                     self._resend_ctrl_msg(self.ACK)
                     
+                # May come from FIN-WAIT-1, FIN-WAIT-2, or CLOSING state
+                # FIN-WAIT-1: Received a FIN+ACK flag
+                # FIN-WAIT-2: Received a FIN flag
+                # CLOSING: Received an ACK flag
+                # Sends an ACK flag
                 elif self._state == States.TIMED_WAIT:
                     logging.debug("THREAD-SEND: TIMED_WAIT")
                     self._resend_ctrl_msg(self.ACK)
                     
+                # Only come from ESTABLISHED state
+                # ESTABLISHED: Received a FIN flag
+                # Sends an ACK flag
                 elif self._state == States.CLOSE_WAIT:
                     logging.debug("THREAD-SEND: CLOSE_WAIT")
                     self._resend_ctrl_msg(self.ACK)
                     
+                # Only come from CLOSE-WAIT state
+                # CLOSE-WAIT: close() is called
+                # Sends a FIN flag
                 elif self._state == States.LAST_ACK:
                     logging.debug("THREAD-SEND: LAST_ACK")
                     self._resend_ctrl_msg(self.FIN)
+
+                # END closing procedures and states
                 
                 #Handle Receiving
                 try:
@@ -479,6 +510,7 @@ class RxpSocket:
                             self._shutdown()
                     
 
+## Old code
 
 class RxpSocket_old:
     _send_buffer = bytearray() # bytes (no limit)
