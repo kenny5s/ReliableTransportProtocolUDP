@@ -129,12 +129,14 @@ class RxpSocket:
             self._parent_socket = None
         logging.debug('Shutdown successful.')
         
-    def _start_closing_timer(self):
+    def _start_closing_timer(self, timeout=None):
         def become_closed():
             logging.debug("Shutting Down...")
             self._shutdown()
         logging.debug("Starting Close timer")
-        threading.Timer(self._CLOSING_TIMEOUT, become_closed).start()
+        if timeout == None:
+            timeout = self._CLOSING_TIMEOUT
+        threading.Timer(timeout, become_closed).start()
         
     def _close_sendrcv_thread(self):
         pass
@@ -507,7 +509,7 @@ class RxpSocket:
                     elif self._state == States.LAST_ACK:
                         logging.debug("THREAD-RECEIVE: LAST_ACK")
                         if header.flags == self.ACK:
-                            self._shutdown()
+                            self._start_closing_timer(0)
                     
 
 ## Old code
