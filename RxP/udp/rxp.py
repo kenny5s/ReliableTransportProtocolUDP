@@ -35,12 +35,16 @@ class States(Enum):
     SYN_ACK_RCVD = 11
     
 class SocketConnection:
-    socket = None
-    send_forwarding = [] #packets
-    recv_forwarding = [] #packets
-    
     def __init__(self, sock):
         self.socket = sock
+        self.send_forwarding = [] #packets
+        self.recv_forwarding = [] #packets
+        
+class TimedPacket:
+    def __init__(self, packet, timer):
+        self.packet = packet        
+        self.timer = timer
+    
 
 class RxpSocket:
     ACK = 1 << 4
@@ -86,14 +90,15 @@ class RxpSocket:
         self._connections = {} # (addr): SocketConnections, All connections go here.
         
         #data transfer
+        self._mtu = 1024 # maximum payload size
         self._send_buffer = bytearray() # bytes (no limit)
         self._recv_buffer = bytearray() # bytes
-        self._send_window = collections.OrderedDict() # packets
+        self._send_window = collections.OrderedDict() # TimedPackets
         self._receive_window = collections.OrderedDict() # packets
-        self._seq_number = 0
-        self._ack_number = 0
-        self._send_window_size = 100
-        self._mtu = 1024 # maximum data size
+        self._seq_number = 0 # byte position of data sent so far (doesn't have to be acked)
+        self._ack_number = 0 # byte position of next missing byte to be received (beginning of recv window)
+        self._send_window_size = 20*self._mtu # bytes, will be dynamic if we do "flow control"
+        self._receive_window_size = 20*self._mtu # bytes, will be configurable
         
         self._src = () # (ip,port)
         self._dest = ()
@@ -227,12 +232,14 @@ class RxpSocket:
             while(self._state != States.CLOSED):
                 pass
             
+        #TODO Closing should wait until the sending is complete.
         #needs to wait until closed
         #needs to wait until all child sockets are closed
         
     def _udp_sendto(self, packet, address):
         if self._parent_socket is None:
             with self._socket_lock:
+                packet.header.checksum = self._generate_checksum(packet)
                 value = self._sock.sendto(packet.to_bytes(), address)
         else:
             value = len(packet.to_bytes()) # will be incorrect, but whatever
@@ -249,6 +256,12 @@ class RxpSocket:
             #with self._listen_lock:
             data = self._parent_socket._connections[addr].recv_forwarding.pop(False).to_bytes()
         return data, addr
+    
+    def _resend_packet(self, timed_packet):
+        self._udp_sendto(timed_packet.packet, self._dest)
+        timed_packet.timer = threading.Timer(self._SENDING_TIMEOUT, self._resend_thread, [timed_packet])
+        timed_packet.timer.start()
+            
     
     def _send_ctrl_msg(self, flags, addr, timer=False):
         logging.debug("Sending ctrl[{}] to {}".format(flags, addr))
@@ -291,11 +304,13 @@ class RxpSocket:
 
     # Puts data into the receive buffer and return the size of data
     def send(self, data):
+        #TODO should hang until complete
         self._send_buffer.extend(data)
         return len(data)
 
     # Reserve space in the byte array
     def receive(self, buffer_size):
+        #TODO should hang until complete
         ret = self._recv_buffer[:buffer_size]
         _recv_buffer = self._recv_buffer[buffer_size:]
         return ret
@@ -303,6 +318,7 @@ class RxpSocket:
     # Main function that represents the state diagram
     def _send_receive_thread(self):
         shutdown_at_end = False
+
         while(self._thread_send_recv_enabled):
             logging.debug("Requesting _send_recv_lock...")
             with self._send_recv_lock:
@@ -353,18 +369,21 @@ class RxpSocket:
                     #Pipeline Send:
                     #Does not require a port to be binded
                     #Will constantly check the send buffer for packets, pop data out of it into a sending window,
-                    #send the packet to the target destination, waits for acks or timeout, if timeout resend the packet,
-                    #else slide the window
+                    #send the packet to the target destination, waits for acks or timeout, if timeout resend the packet
                     if len(self._send_window) < self._send_window_size and self._send_buffer:
+                        logging.debug("Creating data packet")
                         pkt = RxpPacket(self._send_buffer[:self._mtu])
                         pkt.header.seq_number = self._seq_number
                         pkt.header.ack_number = self._ack_number
-                        self._send_window[self._seq_number] = (pkt, False)
+                        logging.debug("Generating checksum")
+                        pkt.header.checksum = self._generate_checksum(pkt)
+                        timed_packet = TimedPacket(pkt, None)
+                        self._send_window[self._seq_number] = timed_packet
                         self._send_buffer = self._send_buffer[self._mtu:]
-                        #start resend timer
-                    for pkt_tuple in self._send_window:
-                        if pkt_tuple[1]:
-                            self._udp_sendto(pkt_tuple[0], self._dest)
+                        #TODO: Handle integer overflow for seq_number
+                        self._seq_number += len(pkt.payload)
+                        logging.debug("Sending data packet: seq={}".format(pkt.header.seq_number))
+                        self._resend_packet(timed_packet) #starts resend timer
                 
                 # Closing procedures and states
 
@@ -503,6 +522,7 @@ class RxpSocket:
                                 self._send_ctrl_msg(self.ACK, addr)
                             elif header.flags == self.SYN_ACK: #for 3-way handshake... not needed anymore?
                                 self._send_ctrl_msg(self.ACK, addr)
+                            #TODO: How to distinguish data acks from ctrl acks?
                             elif header.flags == self.ACK: # 4-way handshake
                                 logging.debug("Sending ACK reply")
                                 self._send_ctrl_msg(self.ACK, addr)
@@ -512,6 +532,17 @@ class RxpSocket:
                                 #if curr_seq is higher and not window, put packet in window_buffer
                                 #if all seq numbers up to this one is received, put in recv buffer
                                 #ack back w/ recv_window
+                                #!! How to solve seq_number wrap around problem?
+                                if header.seq_number == self._ack_number: #this is in order
+                                    self._recv_buffer.extend(pkt.payload)
+                                    self._seq_number += len(pkt.payload)
+                                    
+                       
+                                ack_pkt = RxpPacket()
+                                ack_pkt.header.ack = 1
+                                ack_pkt.header.seq_number = self._seq_number
+                                ack_pkt.header.ack_number = header.seq_number + 1 
+                                self._udp_sendto(ack_pkt, self._dest)
                                 reply_pkt = RxpPacket(b"Hello")
                                 self._udp_sendto(reply_pkt, addr)
                         
@@ -700,6 +731,7 @@ class RxpSocket_old:
                 self._send_window_size = pkt.header.window_size
                 #check sequence number
                 pass
+            
             elif addr not in self._connection_queue:
                 pass
     
