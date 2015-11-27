@@ -266,6 +266,7 @@ class RxpSocket:
             addr = self._dest
             #with self._listen_lock:
             data = self._parent_socket._connections[addr].recv_forwarding.pop(False).to_bytes()
+        validation = _validate_checksum(self, data)
         return data, addr
     
     def _resend_packet(self, timed_packet):
@@ -298,8 +299,10 @@ class RxpSocket:
         
     #If checksum is good, return True, else False
     def _validate_checksum(self, packet):
-        #TODO
-        return True
+        rcvd_checksum = packet.header.checksum
+        packet.header.checksum = 0
+        checksum = _generate_checksum(self, packet)
+        return rcvd_checksum == checksum
     
     # takes in bytearray
     def _generate_checksum(self, packet):
