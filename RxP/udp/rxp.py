@@ -292,11 +292,12 @@ class RxpSocket:
             addr = self._dest
             #with self._listen_lock:
             data = self._parent_socket._connections[addr].recv_forwarding.pop(False).to_bytes()
-        pkt = RxpPacket()
-        pkt.from_bytes(data)
-        validation = self._validate_checksum(pkt)
-        if not validation:
-            raise Exception("Packet corrupted.")
+        if data is not None:
+            pkt = RxpPacket()
+            pkt.from_bytes(data)
+            validation = self._validate_checksum(pkt)
+            if not validation:
+                raise CorreptPacketError("Packet corrupted.")
         return data, addr
     
     def _resend_packet(self, timed_packet):
@@ -332,6 +333,8 @@ class RxpSocket:
         rcvd_checksum = packet.header.checksum
         packet.header.checksum = 0
         checksum = self._generate_checksum(packet)
+        logging.debug(rcvd_checksum)
+        logging.debug(checksum)
         return rcvd_checksum == checksum
     
     # takes in bytearray
@@ -505,7 +508,7 @@ class RxpSocket:
                 #Handle Receiving
                 try:
                     data, addr = self._udp_recvfrom(self._udp_buffer_size)
-                except Exception as e:
+                except (BlockingIOError, CorreptPacketError, IndexError) as e:
                     logging.debug(e)
                     logging.debug("Nothing received.")
                 else:
