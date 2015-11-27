@@ -45,6 +45,7 @@ class TimedPacket:
     def __init__(self, packet, timer):
         self.packet = packet        
         self.timer = timer
+        self.acked = False
     
 
 class RxpSocket:
@@ -358,7 +359,7 @@ class RxpSocket:
                 # 4-way handshake procedure (not in order)
                 elif self._state == States.SYN_RCVD:
                     logging.debug("THREAD-SEND: SYN_RCVD")
-                    self._resend_ctrl_msg(self.SYN_ACK)
+                    self._resend_ctrl_msg(self.SYN_ACK) #maybe we don't need this...
                     
                 elif self._state == States.SYN_SENT:
                     logging.debug("THREAD-SEND: SYN_SENT")
@@ -527,10 +528,15 @@ class RxpSocket:
                                 self._send_ctrl_msg(self.ACK, addr)
                             elif header.flags == self.SYN_ACK: #for 3-way handshake... not needed anymore?
                                 self._send_ctrl_msg(self.ACK, addr)
-                            #TODO: How to distinguish data acks from ctrl acks?
+                            #TODO: How to distinguish data acks from ctrl acks?, Solution: use 3-way handshake or use another SYN_ACK
                             elif header.flags == self.ACK: # 4-way handshake
                                 logging.debug("Sending ACK reply")
                                 self._send_ctrl_msg(self.ACK, addr)
+                                if pkt.header.ack_number in self._send_window:
+                                    timed_packet = self._send_window[pkt.header.ack_number]
+                                    timed_packet.timer.cancel()
+                                    timed_packet.acked = True
+                                
                             elif header.flags == 0:
                                 #pipeline receive:
                                 #check seq number
@@ -601,6 +607,11 @@ class RxpSocket:
                                 self._receive_window[(k + self._receive_window_size)%self._MAX_SEQ_NUMBER] = None
                                 self._receive_ack_window.pop(False)
                                 self._receive_ack_window.append(k)
+
+                        for seq in self._send_window:
+                            timed_packet = self._send_window[seq]
+                            if timed_packet.acked:
+                                self._send_window.pop(seq)
                                 
                             
             if shutdown_at_end:
