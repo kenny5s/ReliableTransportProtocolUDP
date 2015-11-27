@@ -46,7 +46,12 @@ class TimedPacket:
         self.packet = packet        
         self.timer = timer
         self.acked = False
+
+class InvalidSocketOperationException(Exception):
+    pass
     
+class ClosedSocketException(InvalidSocketOperationException):
+    pass
 
 class RxpSocket:
     ACK = 1 << 4
@@ -66,7 +71,7 @@ class RxpSocket:
     
     _ACCEPT_TIMEOUT = 60 #seconds
     _CLOSING_TIMEOUT = 2 #seconds
-    _SENDING_TIMEOUT = 10 #0.05 #seconds
+    _SENDING_TIMEOUT = 0.05 #seconds
     _RECV_SLEEP = 0.05
     
     logging.basicConfig(format='[%(thread)d]%(funcName)s:%(lineno)d::%(message)s', level=logging.ERROR)
@@ -88,6 +93,7 @@ class RxpSocket:
         self._thread_ctrl_timer = None
         
         #connections
+        self._is_closed = False
         self._ctrl_needs_sending = True
         self._max_backlog_connections = 1
         self._pending_connections = [] # SYN_RCVD, [(addr1), (addr2)]
@@ -149,7 +155,6 @@ class RxpSocket:
         else:
             #remove from parent
             self._parent_socket._connections.pop(self._dest)
-            self._parent_socket._established_connections.remove(self._dest)
             self._parent_socket = None
         self._state = States.CLOSED
         logging.debug('Shutdown successful.')
@@ -167,6 +172,8 @@ class RxpSocket:
         pass
         
     def bind(self, address):
+        if self._is_closed:
+            raise ClosedSocketException("Cannot bind using closed socket.")
         #can only bind if not connected
         with self._socket_lock:
             self._sock.bind(address)
@@ -175,6 +182,8 @@ class RxpSocket:
             self._src[0] = '127.0.0.1'
             
     def listen(self, backlog):
+        if self._is_closed:
+            raise ClosedSocketException("Cannot listen using a closed socket.")
         #can only listen if bound and not connected
         self._max_backlog_connections = backlog
         self._state = States.LISTEN
@@ -182,6 +191,8 @@ class RxpSocket:
         self._start_threads()
         
     def accept(self):
+        if self._is_closed:
+            raise ClosedSocketException("Cannot accept using a closed socket.")
         wait = True
         def stop_wait():
             raise socket.timeout()
@@ -205,6 +216,8 @@ class RxpSocket:
             
             
     def connect(self, address):
+        if self._is_closed:
+            raise ClosedSocketException("Cannot connect using a closed socket.")
         #can only connect when not listening
         self._start_threads()
         self._send_ctrl_msg(self.SYN, address, True)
@@ -213,9 +226,13 @@ class RxpSocket:
         if address[0] in ['localhost', '']:
             self._dest[0] = '127.0.0.1'
         #needs to wait until connected
-                    
-    def close(self):
+        
+    def _closing(self):
+        self._is_closed = True
         if self._state == States.LISTEN:
+            while self._connections:
+                time.sleep(self._RECV_SLEEP)
+            '''
             while True:
                 #TODO should not try to close child sockets...
                 #with self._listen_lock:
@@ -231,6 +248,7 @@ class RxpSocket:
                     logging.debug("closed child socket for {}".format(addr))
                 if not self._connections:
                     break
+            '''
             self._shutdown()
                    
         elif self._state != States.LISTEN:
@@ -241,11 +259,15 @@ class RxpSocket:
                 self._state = States.FIN_WAIT_1
             elif self._state == States.CLOSE_WAIT:
                 self._state = States.LAST_ACK
-            while(self._state != States.CLOSED):
-                pass
             
         #TODO Closing should wait until the sending is complete.
         #Should not wait until closed
+                    
+    def close(self):
+        if self._is_closed:
+            raise ClosedSocketException("Socket is already closed.")
+        threading.Thread(target=self._closing).start()
+        
         
     def _udp_sendto(self, packet, address):
         if self._parent_socket is None:
@@ -325,12 +347,16 @@ class RxpSocket:
 
     # Puts data into the send buffer and return the size of data
     def send(self, data):
+        if self._is_closed:
+            raise ClosedSocketException("Cannot send using a closed socket.")
         #TODO should hang until complete?
         self._send_buffer.extend(data)
         return len(data)
     
     # Adds data to end of send buffer, and waits until buffer is empty (data was popped)
     def sendall(self, data):
+        if self._is_closed:
+            raise ClosedSocketException("Cannot send using a closed socket.")
         self._send_buffer.extend(data)
         while(self._send_buffer):
             time.sleep(self._RECV_SLEEP)
@@ -338,6 +364,8 @@ class RxpSocket:
 
     # Reserve space in the byte array
     def recv(self, buffer_size):
+        if self._is_closed:
+            raise ClosedSocketException("Cannot receive using a closed socket.")
         #TODO should hang until complete
         while not self._recv_buffer:
             time.sleep(self._RECV_SLEEP)
@@ -410,7 +438,6 @@ class RxpSocket:
                         pkt.header.ack_number = self._ack_number
                         timed_packet = TimedPacket(pkt, None)
                         self._send_window[self._seq_number] = timed_packet
-                        #TODO: Handle integer overflow for seq_number
                         self._seq_number = (self._seq_number + 1) % (self._MAX_SEQ_NUMBER)
                         logging.info("Sending data packet: seq={}, ack={}, data={}".format(pkt.header.seq_number, pkt.header.ack_number, msg))
                         self._resend_packet(timed_packet) #starts resend timer
@@ -494,7 +521,7 @@ class RxpSocket:
                             
                             # Received SYN -> make new connection
                             
-                            if (header.flags == self.SYN and not self._backlog_full()):
+                            if (header.flags == self.SYN and not self._backlog_full() and not self._is_closed):
                                 with self._listen_lock:
                                     if addr not in self._connections:
                                         logging.debug("Creating child_socket")
@@ -547,7 +574,6 @@ class RxpSocket:
                         elif self._state == States.ESTABLISHED:
                             logging.debug("THREAD-RECEIVE: ESTABLISHED")
                             if header.flags == self.FIN:
-                                #TODO: Begin closing!
                                 self._state = States.CLOSE_WAIT
                                 self._send_ctrl_msg(self.ACK, addr)
                             elif header.flags == self.SYN_ACK: #for 3-way handshake... not needed anymore?
