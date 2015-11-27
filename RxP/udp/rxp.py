@@ -10,6 +10,7 @@ import collections
 import threading
 import logging
 import time
+import math
 
 from enum import Enum
 
@@ -56,6 +57,8 @@ class RxpSocket:
     NACK = 1 << 6
     FIN = 1
     FIN_ACK = FIN + ACK
+    
+    _MAX_SEQ_NUMBER = math.pow(2,32)
 
     _recv_buffer_max = 1000000 # 1Mb max (better if multiple of _max_packet_size)
     _udp_buffer_size = 2048
@@ -91,14 +94,18 @@ class RxpSocket:
         
         #data transfer
         self._mtu = 1024 # maximum payload size
+        self._seq_number = 0 # the packet number of next packet to be sent, modded by send_window_size
+        self._ack_number = 0 # the packet number of next packet to be received, (beginning of recv window)
+        self._send_window_size = 20 # packets, will be dynamic if we do "flow control"
+        self._receive_window_size = 20 # packets, will be configurable, must be less than MAX_SEQ_NUM/2
         self._send_buffer = bytearray() # bytes (no limit)
         self._recv_buffer = bytearray() # bytes
         self._send_window = collections.OrderedDict() # TimedPackets
         self._receive_window = collections.OrderedDict() # packets
-        self._seq_number = 0 # byte position of data sent so far (doesn't have to be acked)
-        self._ack_number = 0 # byte position of next missing byte to be received (beginning of recv window)
-        self._send_window_size = 20*self._mtu # bytes, will be dynamic if we do "flow control"
-        self._receive_window_size = 20*self._mtu # bytes, will be configurable
+        self._receive_ack_window = [] # ack_nums
+        
+        for i in range(self._ack_number, self._ack_number + self._receive_window_size):
+            self._receive_window[i%(self._MAX_SEQ_NUMBER)] = None
         
         self._src = () # (ip,port)
         self._dest = ()
@@ -375,13 +382,11 @@ class RxpSocket:
                         pkt = RxpPacket(self._send_buffer[:self._mtu])
                         pkt.header.seq_number = self._seq_number
                         pkt.header.ack_number = self._ack_number
-                        logging.debug("Generating checksum")
-                        pkt.header.checksum = self._generate_checksum(pkt)
                         timed_packet = TimedPacket(pkt, None)
                         self._send_window[self._seq_number] = timed_packet
                         self._send_buffer = self._send_buffer[self._mtu:]
                         #TODO: Handle integer overflow for seq_number
-                        self._seq_number += len(pkt.payload)
+                        self._seq_number = (self._seq_number + 1) % (self._MAX_SEQ_NUMBER)
                         logging.debug("Sending data packet: seq={}".format(pkt.header.seq_number))
                         self._resend_packet(timed_packet) #starts resend timer
                 
@@ -532,19 +537,18 @@ class RxpSocket:
                                 #if curr_seq is higher and not window, put packet in window_buffer
                                 #if all seq numbers up to this one is received, put in recv buffer
                                 #ack back w/ recv_window
-                                #!! How to solve seq_number wrap around problem?
-                                if header.seq_number == self._ack_number: #this is in order
-                                    self._recv_buffer.extend(pkt.payload)
-                                    self._seq_number += len(pkt.payload)
-                                    
-                       
-                                ack_pkt = RxpPacket()
-                                ack_pkt.header.ack = 1
-                                ack_pkt.header.seq_number = self._seq_number
-                                ack_pkt.header.ack_number = header.seq_number + 1 
-                                self._udp_sendto(ack_pkt, self._dest)
-                                reply_pkt = RxpPacket(b"Hello")
-                                self._udp_sendto(reply_pkt, addr)
+                                if header.seq_number in list(self._receive_window):
+                                    if self._receive_window[header.seq_number] is None:
+                                        self._receive_window[header.seq_number] = pkt
+                                    if header.seq_number == self._ack_number:
+                                        while self._receive_window[self._ack_number] is not None:
+                                            self._ack_number = (self._ack_number + 1) % self._MAX_SEQ_NUMBER
+                                if header.seq_number in list(self._receive_window) or header.seq_number in self._receive_ack_window:
+                                    ack_pkt = RxpPacket()
+                                    ack_pkt.header.flags = self.ACK
+                                    ack_pkt.header.ack_number = self._ack_number
+                                    ack_pkt.header.seq_number = self._seq_number
+                                    self._udp_sendto(ack_pkt, addr)
                         
                         elif self._state == States.FIN_WAIT_1:
                             logging.debug("THREAD-RECEIVE: FIN_WAIT_1")
@@ -588,6 +592,16 @@ class RxpSocket:
                             logging.debug("THREAD-RECEIVE: LAST_ACK")
                             if header.flags == self.ACK:
                                 shutdown_at_end = True
+                            
+                        for k in self._receive_window:
+                            if k < self._ack_number:
+                                p = self._receive_window.pop(k)
+                                if p is not None:
+                                    self._recv_buffer.extend(p.payload)
+                                self._receive_window[(k + self._receive_window_size)%self._MAX_SEQ_NUMBER] = None
+                                self._receive_ack_window.pop(False)
+                                self._receive_ack_window.append(k)
+                                
                             
             if shutdown_at_end:
                 self._shutdown()
