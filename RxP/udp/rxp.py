@@ -59,16 +59,17 @@ class RxpSocket:
     FIN = 1
     FIN_ACK = FIN + ACK
     
-    _MAX_SEQ_NUMBER = math.pow(2,32)
+    _MAX_SEQ_NUMBER = int(math.pow(2,32))
 
     _recv_buffer_max = 1000000 # 1Mb max (better if multiple of _max_packet_size)
     _udp_buffer_size = 2048
     
     _ACCEPT_TIMEOUT = 60 #seconds
     _CLOSING_TIMEOUT = 2 #seconds
-    _SENDING_TIMEOUT = 0.003 #seconds
+    _SENDING_TIMEOUT = 10 #0.05 #seconds
+    _RECV_SLEEP = 0.05
     
-    logging.basicConfig(format='[%(thread)d]%(funcName)s:%(lineno)d::%(message)s', level=logging.INFO)
+    logging.basicConfig(format='[%(thread)d]%(funcName)s:%(lineno)d::%(message)s', level=logging.ERROR)
     
     _parent_socket = None # if not None, then you are a child socket
     
@@ -187,18 +188,20 @@ class RxpSocket:
         t = threading.Timer(self._ACCEPT_TIMEOUT, stop_wait)
         t.start()
         conn = None
+        addr = None
         while(wait):
             with self._listen_lock:
                 if len(self._established_connections) > 0:
                     t.cancel()
-                    conn = self._connections[self._established_connections.pop(False)]
+                    addr = self._established_connections.pop(False)
+                    conn = self._connections[addr]
                     wait = False
             time.sleep(0.001)
         print("Connection")
         print(conn)
         if conn is None:
             raise socket.timeout()
-        return conn.socket
+        return (conn.socket, addr)
             
             
     def connect(self, address):
@@ -214,6 +217,7 @@ class RxpSocket:
     def close(self):
         if self._state == States.LISTEN:
             while True:
+                #TODO should not try to close child sockets...
                 #with self._listen_lock:
                 if self._connections:
                     addr = list(self._connections)[0]
@@ -241,8 +245,7 @@ class RxpSocket:
                 pass
             
         #TODO Closing should wait until the sending is complete.
-        #needs to wait until closed
-        #needs to wait until all child sockets are closed
+        #Should not wait until closed
         
     def _udp_sendto(self, packet, address):
         if self._parent_socket is None:
@@ -267,8 +270,9 @@ class RxpSocket:
     
     def _resend_packet(self, timed_packet):
         self._udp_sendto(timed_packet.packet, self._dest)
-        timed_packet.timer = threading.Timer(self._SENDING_TIMEOUT, self._resend_thread, [timed_packet])
+        timed_packet.timer = threading.Timer(self._SENDING_TIMEOUT, self._resend_packet, [timed_packet])
         timed_packet.timer.start()
+        logging.info("Sending timed packet: {}".format(timed_packet.packet.payload))
             
     
     def _send_ctrl_msg(self, flags, addr, timer=False):
@@ -295,33 +299,46 @@ class RxpSocket:
     #If checksum is good, return True, else False
     def _validate_checksum(self, packet):
         #TODO
-        pass
-
+        return True
+    
+    
     # generates checksum
     # takes in bytes
-    def _generate_checksum(packet):
+    def _generate_checksum(self, packet):
+        return 0
+    '''
         s = 0
         for i in range(0, len(msg), 2):
             w = ord(msg[i]) + (ord(msg[i+1]) << 8)
             s = carry_around_add(s,w)
         return ~s & 0xffff
-
+    
     def carry_around_add(a, b):
         c = a + b
         return (c & 0xffff) + (c >> 16)
+    '''
 
-    # Puts data into the receive buffer and return the size of data
+    # Puts data into the send buffer and return the size of data
     def send(self, data):
-        #TODO should hang until complete
+        #TODO should hang until complete?
         self._send_buffer.extend(data)
         return len(data)
+    
+    # Adds data to end of send buffer, and waits until buffer is empty (data was popped)
+    def sendall(self, data):
+        self._send_buffer.extend(data)
+        while(self._send_buffer):
+            time.sleep(self._RECV_SLEEP)
+        return None
 
     # Reserve space in the byte array
-    def receive(self, buffer_size):
+    def recv(self, buffer_size):
         #TODO should hang until complete
+        while not self._recv_buffer:
+            time.sleep(self._RECV_SLEEP)
         ret = self._recv_buffer[:buffer_size]
-        _recv_buffer = self._recv_buffer[buffer_size:]
-        return ret
+        self._recv_buffer = self._recv_buffer[buffer_size:]
+        return bytes(ret)
         
     # Main function that represents the state diagram
     def _send_receive_thread(self):
@@ -335,10 +352,11 @@ class RxpSocket:
                     break
                 
                 #for debug:
-                #time.sleep(5)
+                #time.sleep(3)
                 logging.debug(self._state)
                 logging.debug(self._dest)
-                logging.debug(self._connections)
+                logging.info('Ack: {}'.format(self._ack_number))
+                logging.info('Seq: {}'.format(self._seq_number))
                 
                 #Handle Sending
                 if self._state == States.CLOSED:
@@ -379,16 +397,17 @@ class RxpSocket:
                     #Will constantly check the send buffer for packets, pop data out of it into a sending window,
                     #send the packet to the target destination, waits for acks or timeout, if timeout resend the packet
                     if len(self._send_window) < self._send_window_size and self._send_buffer:
-                        logging.debug("Creating data packet")
-                        pkt = RxpPacket(self._send_buffer[:self._mtu])
+                        logging.info("Creating data packet")
+                        msg = self._send_buffer[:self._mtu]
+                        pkt = RxpPacket(msg)
+                        self._send_buffer = self._send_buffer[self._mtu:]
                         pkt.header.seq_number = self._seq_number
                         pkt.header.ack_number = self._ack_number
                         timed_packet = TimedPacket(pkt, None)
                         self._send_window[self._seq_number] = timed_packet
-                        self._send_buffer = self._send_buffer[self._mtu:]
                         #TODO: Handle integer overflow for seq_number
                         self._seq_number = (self._seq_number + 1) % (self._MAX_SEQ_NUMBER)
-                        logging.debug("Sending data packet: seq={}".format(pkt.header.seq_number))
+                        logging.info("Sending data packet: seq={}, ack={}, data={}".format(pkt.header.seq_number, pkt.header.ack_number, msg))
                         self._resend_packet(timed_packet) #starts resend timer
                 
                 # Closing procedures and states
@@ -532,8 +551,9 @@ class RxpSocket:
                             elif header.flags == self.ACK: # 4-way handshake
                                 logging.debug("Sending ACK reply")
                                 self._send_ctrl_msg(self.ACK, addr)
-                                if pkt.header.ack_number in self._send_window:
-                                    timed_packet = self._send_window[pkt.header.ack_number]
+                                if header.ack_number in self._send_window:
+                                    logging.info('Received ACK for {}, canceling resend timer...'.format(header.ack_number))
+                                    timed_packet = self._send_window[header.ack_number]
                                     timed_packet.timer.cancel()
                                     timed_packet.acked = True
                                 
@@ -543,13 +563,19 @@ class RxpSocket:
                                 #if curr_seq is higher and not window, put packet in window_buffer
                                 #if all seq numbers up to this one is received, put in recv buffer
                                 #ack back w/ recv_window
+                                logging.info("Received: {}".format(pkt.payload))
+                                logging.info(list(self._receive_window))
                                 if header.seq_number in list(self._receive_window):
+                                    logging.info(header.seq_number)
                                     if self._receive_window[header.seq_number] is None:
+                                        logging.info('Storing packet')
                                         self._receive_window[header.seq_number] = pkt
                                     if header.seq_number == self._ack_number:
+                                        logging.info('Updating ack number')
                                         while self._receive_window[self._ack_number] is not None:
                                             self._ack_number = (self._ack_number + 1) % self._MAX_SEQ_NUMBER
                                 if header.seq_number in list(self._receive_window) or header.seq_number in self._receive_ack_window:
+                                    logging.info('Sending Ack={}'.format(self._ack_number))
                                     ack_pkt = RxpPacket()
                                     ack_pkt.header.flags = self.ACK
                                     ack_pkt.header.ack_number = self._ack_number
@@ -599,19 +625,32 @@ class RxpSocket:
                             if header.flags == self.ACK:
                                 shutdown_at_end = True
                             
+                        logging.info('Receive Window:')
+                        logging.info(self._receive_window)
+                        logging.info('Ack Window:')
+                        logging.info(self._receive_ack_window)
                         for k in self._receive_window:
                             if k < self._ack_number:
+                                logging.info('{} < {}'.format(k, self._ack_number))
                                 p = self._receive_window.pop(k)
                                 if p is not None:
+                                    logging.info('Adding {} to recv_buffer'.format(p.payload))
                                     self._recv_buffer.extend(p.payload)
                                 self._receive_window[(k + self._receive_window_size)%self._MAX_SEQ_NUMBER] = None
-                                self._receive_ack_window.pop(False)
                                 self._receive_ack_window.append(k)
+                                if len(self._receive_ack_window) >= self._receive_window_size:
+                                    n = self._receive_ack_window.pop(False)
+                                    logging.info('Removing {} from ack_window'.format(n))
 
+                        logging.info('Send Window:')
+                        logging.info(self._send_window)
                         for seq in self._send_window:
                             timed_packet = self._send_window[seq]
                             if timed_packet.acked:
-                                self._send_window.pop(seq)
+                                logging.info('Popping {} from send_window'.format(seq))
+                                self._send_window.pop(seq).timer.cancel()
+                            else:
+                                break
                                 
                             
             if shutdown_at_end:
