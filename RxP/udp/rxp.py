@@ -53,6 +53,9 @@ class InvalidSocketOperationException(Exception):
 class ClosedSocketException(InvalidSocketOperationException):
     pass
 
+class CorreptPacketError(Exception):
+    pass
+
 class RxpSocket:
     ACK = 1 << 4
     SYN = 1 << 1
@@ -74,7 +77,7 @@ class RxpSocket:
     _SENDING_TIMEOUT = 0.05 #seconds
     _RECV_SLEEP = 0.05
     
-    logging.basicConfig(format='[%(thread)d]%(funcName)s:%(lineno)d::%(message)s', level=logging.ERROR)
+    logging.basicConfig(format='[%(thread)d]%(funcName)s:%(lineno)d::%(message)s', level=logging.DEBUG)
     
     _parent_socket = None # if not None, then you are a child socket
     
@@ -272,6 +275,7 @@ class RxpSocket:
     def _udp_sendto(self, packet, address):
         if self._parent_socket is None:
             with self._socket_lock:
+                packet.header.checksum = 0
                 packet.header.checksum = self._generate_checksum(packet)
                 value = self._sock.sendto(packet.to_bytes(), address)
         else:
@@ -288,7 +292,11 @@ class RxpSocket:
             addr = self._dest
             #with self._listen_lock:
             data = self._parent_socket._connections[addr].recv_forwarding.pop(False).to_bytes()
-        validation = _validate_checksum(self, data)
+        pkt = RxpPacket()
+        pkt.from_bytes(data)
+        validation = self._validate_checksum(pkt)
+        if not validation:
+            raise Exception("Packet corrupted.")
         return data, addr
     
     def _resend_packet(self, timed_packet):
@@ -323,7 +331,7 @@ class RxpSocket:
     def _validate_checksum(self, packet):
         rcvd_checksum = packet.header.checksum
         packet.header.checksum = 0
-        checksum = _generate_checksum(self, packet)
+        checksum = self._generate_checksum(packet)
         return rcvd_checksum == checksum
     
     # takes in bytearray
@@ -388,7 +396,7 @@ class RxpSocket:
                     break
                 
                 #for debug:
-                #time.sleep(3)
+                time.sleep(3)
                 logging.debug(self._state)
                 logging.debug(self._dest)
                 logging.info('Ack: {}'.format(self._ack_number))
