@@ -228,6 +228,8 @@ class RxpSocket:
         self._dest = address
         if address[0] in ['localhost', '']:
             self._dest[0] = '127.0.0.1'
+        while self._state != States.ESTABLISHED:
+            time.sleep(self._RECV_SLEEP)
         #needs to wait until connected
         
     def _closing(self):
@@ -277,10 +279,14 @@ class RxpSocket:
             with self._socket_lock:
                 packet.header.checksum = 0
                 packet.header.checksum = self._generate_checksum(packet)
+                logging.debug("Sending packet with checksum = {}".format(packet.header.checksum))
                 value = self._sock.sendto(packet.to_bytes(), address)
         else:
             value = len(packet.to_bytes()) # will be incorrect, but whatever
             #with self._listen_lock:
+            packet.header.checksum = 0
+            packet.header.checksum = self._generate_checksum(packet)
+            logging.debug("Forwarding packet with checksum = {}".format(packet.header.checksum))
             self._parent_socket._connections[address].send_forwarding.append(packet) # can expect error
         return value
     
@@ -331,9 +337,10 @@ class RxpSocket:
     #If checksum is good, return True, else False
     def _validate_checksum(self, packet):
         rcvd_checksum = packet.header.checksum
+        logging.debug(rcvd_checksum)
         packet.header.checksum = 0
         checksum = self._generate_checksum(packet)
-        logging.debug(rcvd_checksum)
+        packet.header.checksum = checksum
         logging.debug(checksum)
         return rcvd_checksum == checksum
     
@@ -554,6 +561,7 @@ class RxpSocket:
                                 with self._listen_lock:
                                     if addr in self._connections:
                                         logging.debug("Forwarding to {}:{}".format(addr[0],addr[1]))
+                                        
                                         self._connections[addr].recv_forwarding.append(pkt)
                                 
                         elif self._state == States.SYN_RCVD:
