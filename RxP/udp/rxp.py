@@ -77,7 +77,7 @@ class RxpSocket:
     _SENDING_TIMEOUT = 0.05 #seconds
     _RECV_SLEEP = 0.05
     
-    logging.basicConfig(format='[%(thread)d]%(funcName)s:%(lineno)d::%(message)s', level=logging.DEBUG)
+    logging.basicConfig(format='[%(thread)d]%(funcName)s:%(lineno)d::%(message)s', level=logging.CRITICAL)
     
     _parent_socket = None # if not None, then you are a child socket
     
@@ -107,8 +107,8 @@ class RxpSocket:
         self._mtu = 1024 # maximum payload size
         self._seq_number = 0 # the packet number of next packet to be sent, modded by send_window_size
         self._ack_number = 0 # the packet number of next packet to be received, (beginning of recv window)
-        self._send_window_size = 20 # packets, will be dynamic if we do "flow control"
-        self._receive_window_size = 20 # packets, will be configurable, must be less than MAX_SEQ_NUM/2
+        self._send_window_size = 1000 # packets, will be dynamic if we do "flow control"
+        self._receive_window_size = 1000 # packets, will be configurable, must be less than MAX_SEQ_NUM/2
         self._send_buffer = bytearray() # bytes (no limit)
         self._recv_buffer = bytearray() # bytes
         self._send_window = collections.OrderedDict() # TimedPackets
@@ -182,7 +182,7 @@ class RxpSocket:
             self._sock.bind(address)
         self._src = address
         if address[0] in ['localhost', '']:
-            self._src[0] = '127.0.0.1'
+            self._src = ('127.0.0.1', address[1])
             
     def listen(self, backlog):
         if self._is_closed:
@@ -200,7 +200,7 @@ class RxpSocket:
         def stop_wait():
             raise socket.timeout()
         t = threading.Timer(self._ACCEPT_TIMEOUT, stop_wait)
-        t.start()
+        #t.start()
         conn = None
         addr = None
         while(wait):
@@ -222,12 +222,13 @@ class RxpSocket:
         if self._is_closed:
             raise ClosedSocketException("Cannot connect using a closed socket.")
         #can only connect when not listening
-        self._start_threads()
-        self._send_ctrl_msg(self.SYN, address, True)
+        
         self._state = States.SYN_SENT
         self._dest = address
         if address[0] in ['localhost', '']:
-            self._dest[0] = '127.0.0.1'
+            self._dest = ('127.0.0.1', address[1])
+        self._start_threads()
+        self._send_ctrl_msg(self.SYN, address, True)
         while self._state != States.ESTABLISHED:
             time.sleep(self._RECV_SLEEP)
         #needs to wait until connected
@@ -406,7 +407,7 @@ class RxpSocket:
                     break
                 
                 #for debug:
-                time.sleep(3)
+                #time.sleep(3)
                 logging.debug(self._state)
                 logging.debug(self._dest)
                 logging.info('Ack: {}'.format(self._ack_number))
@@ -450,6 +451,7 @@ class RxpSocket:
                     #Does not require a port to be binded
                     #Will constantly check the send buffer for packets, pop data out of it into a sending window,
                     #send the packet to the target destination, waits for acks or timeout, if timeout resend the packet
+                    logging.error('Send window size = {}'.format(len(self._send_window)))
                     if len(self._send_window) < self._send_window_size and self._send_buffer:
                         logging.info("Creating data packet")
                         msg = self._send_buffer[:self._mtu]
@@ -604,6 +606,9 @@ class RxpSocket:
                             elif header.flags == self.ACK: # 4-way handshake
                                 logging.debug("Sending ACK reply")
                                 self._send_ctrl_msg(self.ACK, addr)
+                                logging.debug("Ack Number = {}".format(header.ack_number))
+                                logging.debug("Send Window...")
+                                logging.debug(self._send_window)
                                 if header.ack_number in self._send_window:
                                     logging.info('Received ACK for {}, canceling resend timer...'.format(header.ack_number))
                                     timed_packet = self._send_window[header.ack_number]
@@ -678,32 +683,32 @@ class RxpSocket:
                             if header.flags == self.ACK:
                                 shutdown_at_end = True
                             
-                        logging.info('Receive Window:')
-                        logging.info(self._receive_window)
-                        logging.info('Ack Window:')
-                        logging.info(self._receive_ack_window)
-                        for k in self._receive_window:
-                            if k < self._ack_number:
-                                logging.info('{} < {}'.format(k, self._ack_number))
-                                p = self._receive_window.pop(k)
-                                if p is not None:
-                                    logging.info('Adding {} to recv_buffer'.format(p.payload))
-                                    self._recv_buffer.extend(p.payload)
-                                self._receive_window[(k + self._receive_window_size)%self._MAX_SEQ_NUMBER] = None
-                                self._receive_ack_window.append(k)
-                                if len(self._receive_ack_window) >= self._receive_window_size:
-                                    n = self._receive_ack_window.pop(False)
-                                    logging.info('Removing {} from ack_window'.format(n))
+                logging.info('Receive Window:')
+                logging.info(self._receive_window)
+                logging.info('Ack Window:')
+                logging.info(self._receive_ack_window)
+                for k in self._receive_window:
+                    if k < self._ack_number:
+                        logging.info('{} < {}'.format(k, self._ack_number))
+                        p = self._receive_window.pop(k)
+                        if p is not None:
+                            logging.info('Adding {} to recv_buffer'.format(p.payload))
+                            self._recv_buffer.extend(p.payload)
+                        self._receive_window[(k + self._receive_window_size)%self._MAX_SEQ_NUMBER] = None
+                        self._receive_ack_window.append(k)
+                        if len(self._receive_ack_window) >= self._receive_window_size:
+                            n = self._receive_ack_window.pop(False)
+                            logging.info('Removing {} from ack_window'.format(n))
 
-                        logging.info('Send Window:')
-                        logging.info(self._send_window)
-                        for seq in self._send_window:
-                            timed_packet = self._send_window[seq]
-                            if timed_packet.acked:
-                                logging.info('Popping {} from send_window'.format(seq))
-                                self._send_window.pop(seq).timer.cancel()
-                            else:
-                                break
+                logging.info('Send Window:')
+                logging.error(self._send_window)
+                for seq in self._send_window:
+                    timed_packet = self._send_window[seq]
+                    if timed_packet.acked:
+                        logging.info('Popping {} from send_window'.format(seq))
+                        self._send_window.pop(seq).timer.cancel()
+                    else:
+                        break
                                 
                             
             if shutdown_at_end:
